@@ -1,0 +1,8 @@
+{
+  "name": "Sports Betting AI Analyzer",
+  "description": "محلل مراهنات احترافي يعتمد على توزيع بواسون (Poisson Distribution) مع إرسال توقعات تلقائية لقناة تليجرام.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
