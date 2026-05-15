@@ -75,7 +75,7 @@ async function startServer() {
   app.get('/api/logs', (req, res) => {
     try {
       if (fs.existsSync(LOG_FILE)) {
-        const logs = fs.readFileSync(LOG_FILE, 'utf8').split('\n').slice(-50);
+        const logs = fs.readFileSync(LOG_FILE, 'utf8').split('\n').filter(l => l.trim()).slice(-50);
         res.json(logs);
       } else {
         res.json(["No logs available yet."]);
