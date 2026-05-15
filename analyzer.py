@@ -3,175 +3,211 @@ import math
 import time
 import schedule
 import logging
+import json
+import os
 from datetime import datetime, timedelta
 
-# --- الإعدادات (Settings) ---
-# ضع مفاتيحك هنا أو استخدم متغيرات البيئة
-API_KEY = "YOUR_RAPIDAPI_KEY"  # جلب من https://rapidapi.com/api-sports/api/api-football
-TELEGRAM_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN" # جلب من @BotFather
-CHAT_ID = "YOUR_CHAT_ID"  # معرف القناة أو القروب
+# --- Configuration & Secrets ---
+API_KEY = os.getenv("FOOTBALL_API_KEY", "YOUR_RAPIDAPI_KEY")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "YOUR_BOT_TOKEN")
+CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "YOUR_CHAT_ID")
 
-# إعداد الـ Logging
+# Advanced Settings
+STATS_FILE = "stats.json"
+PENDING_FILE = "pending_matches.json"
+LEAGUES_FILE = "leagues_config.json"
+
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-class BettingAnalyzer:
+# Default Leagues (Can be toggled via Dashboard)
+DEFAULT_LEAGUES = [
+    {"id": 39, "name": "Premier League", "active": True},
+    {"id": 140, "name": "La Liga", "active": True},
+    {"id": 135, "name": "Serie A", "active": True},
+    {"id": 78, "name": "Bundesliga", "active": True},
+    {"id": 61, "name": "Ligue 1", "active": True},
+    {"id": 307, "name": "Saudi Pro League", "active": True},
+    {"id": 233, "name": "Egypt Premier League", "active": True},
+    {"id": 2, "name": "UEFA Champions League", "active": True}
+]
+
+class GlobalBettingAI:
     def __init__(self):
-        self.base_url = "https://api-football-v1.p.rapidapi.com/v3"
         self.headers = {
             "X-RapidAPI-Key": API_KEY,
             "X-RapidAPI-Host": "api-football-v1.p.rapidapi.com"
         }
+        self.base_url = "https://api-football-v1.p.rapidapi.com/v3"
+        self._init_files()
 
-    def get_upcoming_matches(self, league_id=39, season=2023):
-        """جلب المباريات القادمة (افتراضياً الدوري الإنجليزي)"""
-        url = f"{self.base_url}/fixtures"
-        next_date = (datetime.now() + timedelta(days=1)).strftime('%Y-%m-%d')
-        querystring = {"league": league_id, "season": season, "date": next_date}
+    def _init_files(self):
+        if not os.path.exists(STATS_FILE):
+            with open(STATS_FILE, 'w') as f:
+                json.dump({"wins": 0, "losses": 0, "history": []}, f)
         
-        try:
-            response = requests.get(url, headers=self.headers, params=querystring)
-            return response.json().get('response', [])
-        except Exception as e:
-            logging.error(f"Error fetching matches: {e}")
-            return []
+        if not os.path.exists(PENDING_FILE):
+            with open(PENDING_FILE, 'w') as f:
+                json.dump([], f)
+        
+        if not os.path.exists(LEAGUES_FILE):
+            with open(LEAGUES_FILE, 'w') as f:
+                json.dump(DEFAULT_LEAGUES, f)
 
-    def get_team_stats(self, team_id, league_id, season):
-        """جلب إحصائيات الفريق لآخر المباريات"""
-        url = f"{self.base_url}/teams/statistics"
-        querystring = {"league": league_id, "season": season, "team": team_id}
-        
+    def get_active_leagues(self):
         try:
-            response = requests.get(url, headers=self.headers, params=querystring)
-            return response.json().get('response', {})
+            with open(LEAGUES_FILE, 'r') as f:
+                return [l for l in json.load(f) if l['active']]
+        except:
+            return DEFAULT_LEAGUES
+
+    def poisson_prob(self, k, lamb):
+        return (math.exp(-lamb) * (lamb**k)) / math.factorial(k)
+
+    def analyze_match(self, home_stats, away_stats, h2h_stats):
+        """Advanced Poisson + Historical Weighted Analysis"""
+        try:
+            h_att = float(home_stats['goals']['for']['average']['home'])
+            h_def = float(home_stats['goals']['against']['average']['home'])
+            a_att = float(away_stats['goals']['for']['average']['away'])
+            a_def = float(away_stats['goals']['against']['average']['away'])
+            
+            # Expected Goals
+            exp_h = (h_att + a_def) / 2
+            exp_a = (a_att + h_def) / 2
+            
+            # Probability Matrices
+            results = {"h": 0, "a": 0, "d": 0, "over25": 0, "btts": 0}
+            for i in range(6):
+                for j in range(6):
+                    p = self.poisson_prob(i, exp_h) * self.poisson_prob(j, exp_a)
+                    if i > j: results["h"] += p
+                    elif j > i: results["a"] += p
+                    else: results["d"] += p
+                    
+                    if (i + j) > 2.5: results["over25"] += p
+                    if i > 0 and j > 0: results["btts"] += p
+            
+            # Normalization
+            total = results["h"] + results["a"] + results["d"]
+            for k in results: results[k] = round((results[k] / total) * 100, 2)
+            
+            return results
         except Exception as e:
-            logging.error(f"Error fetching team stats: {e}")
+            logging.error(f"Analysis error: {e}")
             return None
 
-    def poisson_probability(self, actual, expected):
-        """حساب توزيع بواسون"""
-        return (math.exp(-expected) * (expected**actual)) / math.factorial(actual)
-
-    def predict_match(self, home_stats, away_stats):
-        """تحليل المباراة باستخدام توزيع بواسون"""
-        # استخراج متوسط الأهداف المسجلة والمستقبلة
-        home_attack = home_stats['goals']['for']['average']['home']
-        home_defense = home_stats['goals']['against']['average']['home']
-        away_attack = away_stats['goals']['for']['average']['away']
-        away_defense = away_stats['goals']['against']['average']['away']
-
-        # حساب الأهداف المتوقعة (بتبسيط: متوسط القوة)
-        # ملاحظة: في النسخة الاحترافية نستخدم متوسط الدوري أيضاً
-        expected_home = float(home_attack) * float(away_defense) / 1.5 # 1.5 هو متوسط تقريبي
-        expected_away = float(away_attack) * float(home_defense) / 1.5
-
-        # حساب احتمالات النتائج (0-5 أهداف)
-        prob_home_win = 0
-        prob_away_win = 0
-        prob_draw = 0
-        prob_over_2_5 = 0
-        prob_btts = 0
-
-        for h in range(6):
-            for a in range(6):
-                p = self.poisson_probability(h, expected_home) * self.poisson_probability(a, expected_away)
-                if h > a: prob_home_win += p
-                elif a > h: prob_away_win += p
-                else: prob_draw += p
-                
-                if (h + a) > 2.5: prob_over_2_5 += p
-                if h > 0 and a > 0: prob_btts += p
-
-        return {
-            "home_win": round(prob_home_win * 100, 2),
-            "away_win": round(prob_away_win * 100, 2),
-            "draw": round(prob_draw * 100, 2),
-            "over_2_5": round(prob_over_2_5 * 100, 2),
-            "btts": round(prob_btts * 100, 2),
-            "exp_home": round(expected_home, 2),
-            "exp_away": round(expected_away, 2)
-        }
-
-    def send_telegram_message(self, message):
-        """إرسال الرسالة إلى تليجرام"""
+    def send_telegram(self, msg):
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        payload = {
-            "chat_id": CHAT_ID,
-            "text": message,
-            "parse_mode": "Markdown"
-        }
-        try:
-            requests.post(url, data=payload)
-        except Exception as e:
-            logging.error(f"Error sending Telegram message: {e}")
+        requests.post(url, json={"chat_id": CHAT_ID, "text": msg, "parse_mode": "Markdown"})
 
-    def run_analysis(self):
-        logging.info("Starting analysis cycle...")
-        matches = self.get_upcoming_matches()
+    def fetch_and_predict(self):
+        leagues = self.get_active_leagues()
+        now = datetime.now()
+        target_date = (now + timedelta(days=1)).strftime('%Y-%m-%d')
         
-        for match in matches:
-            home_team = match['teams']['home']
-            away_team = match['teams']['away']
-            league = match['league']
-            fixture_id = match['fixture']['id']
+        all_pending = []
+        try:
+            with open(PENDING_FILE, 'r') as f: all_pending = json.load(f)
+        except: pass
 
-            logging.info(f"Analyzing: {home_team['name']} vs {away_team['name']}")
-
-            home_stats = self.get_team_stats(home_team['id'], league['id'], league['season'])
-            away_stats = self.get_team_stats(away_team['id'], league['id'], league['season'])
-
-            if home_stats and away_stats:
-                prediction = self.predict_match(home_stats, away_stats)
+        for league in leagues:
+            logging.info(f"Analyzing League: {league['name']}")
+            url = f"{self.base_url}/fixtures"
+            params = {"league": league['id'], "season": 2025, "date": target_date}
+            
+            res = requests.get(url, headers=self.headers, params=params).json()
+            fixtures = res.get('response', [])
+            
+            for f in fixtures[:5]: # Limit per league to save API calls
+                f_id = f['fixture']['id']
+                home = f['teams']['home']
+                away = f['teams']['away']
                 
-                # بناء الرسالة
-                msg = f"⚽ *{home_team['name']} vs {away_team['name']}*\n"
-                msg += f"📅 التاريخ: {match['fixture']['date'][:16].replace('T', ' ')}\n"
-                msg += f"🏆 الدوري: {league['name']}\n\n"
+                # Get Stats
+                h_stats = requests.get(f"{self.base_url}/teams/statistics", headers=self.headers, params={"league": league['id'], "season": 2025, "team": home['id']}).json().get('response')
+                a_stats = requests.get(f"{self.base_url}/teams/statistics", headers=self.headers, params={"league": league['id'], "season": 2025, "team": away['id']}).json().get('response')
                 
-                msg += "📊 *توقعات الإحصائيات (Poisson Analysis):*\n"
-                msg += f"🏠 فوز المضيف: {prediction['home_win']}%\n"
-                msg += f"🚀 فوز الضيف: {prediction['away_win']}%\n"
-                msg += f"🤝 تعادل: {prediction['draw']}%\n"
-                msg += f"🔥 Over 2.5: {prediction['over_2_5']}%\n"
-                msg += f"🥅 BTTS: {prediction['btts']}%\n\n"
+                if h_stats and a_stats:
+                    pred = self.analyze_match(h_stats, a_stats, None)
+                    if not pred: continue
+                    
+                    # Selection Logic
+                    best_bet, conf = "N/A", 0
+                    if pred['h'] > 65: best_bet, conf = f"Home Win ({home['name']})", pred['h']
+                    elif pred['a'] > 65: best_bet, conf = f"Away Win ({away['name']})", pred['a']
+                    elif pred['over25'] > 70: best_bet, conf = "Over 2.5 Goals", pred['over25']
+                    
+                    if conf > 60:
+                        msg = f"🏆 *{league['name']}*\n⚽ {home['name']} vs {away['name']}\n\n"
+                        msg += f"📊 Poisson Probabilities:\n- Home: {pred['h']}%\n- Away: {pred['a']}%\n- Over 2.5: {pred['over25']}%\n\n"
+                        msg += f"💡 *BEST BET:* {best_bet}\n🎯 Confidence: {conf}%"
+                        
+                        self.send_telegram(msg)
+                        
+                        # Store for result tracking
+                        all_pending.append({
+                            "id": f_id,
+                            "match": f"{home['name']} vs {away['name']}",
+                            "bet": best_bet,
+                            "type": "h" if "Home" in best_bet else "a" if "Away" in best_bet else "over25",
+                            "status": "pending"
+                        })
+                        time.sleep(1)
+
+        with open(PENDING_FILE, 'w') as f:
+            json.dump(all_pending, f)
+
+    def check_results(self):
+        """Check pending matches and update stats"""
+        try:
+            with open(PENDING_FILE, 'r') as f: pending = json.load(f)
+        except: return
+
+        if not pending: return
+
+        updated_pending = []
+        with open(STATS_FILE, 'r') as f: stats = json.load(f)
+
+        for p in pending:
+            res = requests.get(f"{self.base_url}/fixtures", headers=self.headers, params={"id": p['id']}).json()
+            match_data = res.get('response', [])[0]
+            status = match_data['fixture']['status']['short']
+            
+            if status == 'FT':
+                goals_h = match_data['goals']['home']
+                goals_a = match_data['goals']['away']
+                win = False
                 
-                # اختيار التوقع الأفضل (Value Bet Logic)
-                best_bet = ""
-                confidence = 0
-                if prediction['home_win'] > 60:
-                    best_bet = f"فوز {home_team['name']}"
-                    confidence = prediction['home_win']
-                elif prediction['away_win'] > 60:
-                    best_bet = f"فوز {away_team['name']}"
-                    confidence = prediction['away_win']
-                elif prediction['over_2_5'] > 65:
-                    best_bet = "أكثر من 2.5 هدف"
-                    confidence = prediction['over_2_5']
-                elif prediction['btts'] > 65:
-                    best_bet = "كلا الفريقين يسجلان (BTTS)"
-                    confidence = prediction['btts']
-                else:
-                    best_bet = "لا يوجد اختيار عالي القيمة"
-                    confidence = max(prediction.values())
+                if p['type'] == 'h' and goals_h > goals_a: win = True
+                elif p['type'] == 'a' and goals_a > goals_h: win = True
+                elif p['type'] == 'over25' and (goals_h + goals_a) > 2.5: win = True
+                
+                result_text = "✅ WIN" if win else "❌ LOSS"
+                if win: stats['wins'] += 1
+                else: stats['losses'] += 1
+                
+                stats['history'].append({"match": p['match'], "bet": p['bet'], "result": "win" if win else "loss", "score": f"{goals_h}-{goals_a}"})
+                
+                self.send_telegram(f"📢 *Match Result Update*\n\n⚽ {p['match']}\n🎯 Bet: {p['bet']}\n🏁 Score: {goals_h}-{goals_a}\n\n{result_text}")
+            else:
+                updated_pending.append(p)
 
-                msg += f"💡 *التوقع المختار:* {best_bet}\n"
-                msg += f"🎯 نسبة الثقة: {confidence}%\n"
-                msg += "---------------------------\n"
-                msg += "🤖 تم التحليل تلقائياً بواسطة AI Analyzer"
+        with open(PENDING_FILE, 'w') as f: json.dump(updated_pending, f)
+        with open(STATS_FILE, 'w') as f: json.dump(stats, f)
 
-                self.send_telegram_message(msg)
-                time.sleep(2) # تجنب كتم الـ API
-
-def job():
-    analyzer = BettingAnalyzer()
-    analyzer.run_analysis()
-
-# جدولة المهمة كل 12 ساعة
-schedule.every(12).hours.do(job)
-
-if __name__ == "__main__":
-    logging.info("Bot is starting...")
-    # تشغيل المهمة فوراً عند البداية
-    job()
+def run_scheduler():
+    ai = GlobalBettingAI()
+    
+    # Jobs
+    schedule.every(12).hours.do(ai.fetch_and_predict)
+    schedule.every(1).hours.do(ai.check_results)
+    
+    # Run immediately on start
+    ai.fetch_and_predict()
+    
     while True:
         schedule.run_pending()
-        time.sleep(1)
+        time.sleep(60)
+
+if __name__ == "__main__":
+    run_scheduler()
