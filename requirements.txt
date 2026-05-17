@@ -1,4 +1,5 @@
 requests==2.31.0
-schedule==1.2.1
 pandas==2.2.1
 numpy==1.26.4
+yfinance==0.2.37
+ta==0.11.0

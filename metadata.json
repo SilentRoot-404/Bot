@@ -1,6 +1,6 @@
 {
-  "name": "Sports Betting AI Analyzer",
-  "description": "محلل مراهنات احترافي يعتمد على توزيع بواسون (Poisson Distribution) مع إرسال توقعات تلقائية لقناة تليجرام.",
+  "name": "Binary Options Trading Bot",
+  "description": "بوت تليجرام مؤتمت بالكامل لتحليل سوق الخيارات الثنائية باستخدام EMA و Stochastic، مع إرسال التوصيات وتتبع النتائج تلقائياً.",
   "requestFramePermissions": [],
   "majorCapabilities": [
     "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
